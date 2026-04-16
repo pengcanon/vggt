@@ -150,3 +150,6 @@ skyseg.onnx
 datasets/
 vggt_env/
 examples/
+*.pt
+vggt_env_linux
+training/logs
