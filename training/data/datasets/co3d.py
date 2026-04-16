@@ -70,8 +70,7 @@ class Co3dDataset(BaseDataset):
         common_conf,
         split: str = "train",
         CO3D_DIR: str = None,
-        CO3D_ANNOTATION_DIR: str = None,
-        min_num_images: int = 24,
+        CO3D_ANNOTATION_DIR: str = None,        categories: list = None,        min_num_images: int = 24,
         len_train: int = 100000,
         len_test: int = 10000,
     ):
@@ -101,7 +100,7 @@ class Co3dDataset(BaseDataset):
         if CO3D_DIR is None or CO3D_ANNOTATION_DIR is None:
             raise ValueError("Both CO3D_DIR and CO3D_ANNOTATION_DIR must be specified.")
 
-        category = sorted(SEEN_CATEGORIES)
+        category = categories if categories is not None else sorted(SEEN_CATEGORIES)
 
         if self.debug:
             category = ["apple"]
@@ -115,7 +114,7 @@ class Co3dDataset(BaseDataset):
         else:
             raise ValueError(f"Invalid split: {split}")
 
-        self.invalid_sequence = [] # set any invalid sequence names here
+        self.invalid_sequence = ["43_2162_6539"] # sequences with missing/corrupt files on disk
 
 
         self.category_map = {}
@@ -154,6 +153,19 @@ class Co3dDataset(BaseDataset):
         self.sequence_list = list(self.data_store.keys())
         self.sequence_list_len = len(self.sequence_list)
         self.total_frame_num = total_frame_num
+
+        # Auto-remove sequences whose depth directory is missing on disk
+        if self.load_depth:
+            bad_seqs = [
+                seq_name for seq_name, seq_data in self.data_store.items()
+                if not osp.isdir(
+                    osp.join(self.CO3D_DIR, osp.dirname(seq_data[0]["filepath"])).replace("/images", "/depths")
+                )
+            ]
+            for seq_name in bad_seqs:
+                del self.data_store[seq_name]
+            self.sequence_list = list(self.data_store.keys())
+            self.sequence_list_len = len(self.sequence_list)
 
         status = "Training" if self.training else "Testing"
         logging.info(f"{status}: Co3D Data size: {self.sequence_list_len}")
@@ -214,12 +226,33 @@ class Co3dDataset(BaseDataset):
             image = read_image_cv2(image_path)
 
             if self.load_depth:
-                depth_path = image_path.replace("/images", "/depths") + ".geometric.png"
+                # Normalize slashes safely for replace
+                safe_img_path = image_path.replace("\\", "/")
+                # Handle both native formats (.png) and co3d original formats (.geometric.png)
+                base_depth_path = safe_img_path.replace("/images", "/depths")
+                depth_path_1 = base_depth_path + ".geometric.png" # apples
+                depth_path_2 = base_depth_path.replace(".jpg", ".png").replace(".JPG", ".PNG") # human_body / others
+                
+                if os.path.exists(depth_path_1):
+                    depth_path = depth_path_1
+                elif os.path.exists(depth_path_2):
+                    depth_path = depth_path_2
+                else:
+                    depth_path = depth_path_1 # fallback for error messaging
+                    
                 depth_map = read_depth(depth_path, 1.0)
 
-                mvs_mask_path = image_path.replace(
+                mvs_mask_path = safe_img_path.replace(
                     "/images", "/depth_masks"
-                ).replace(".jpg", ".png")
+                ).replace(".jpg", ".png").replace(".JPG", ".PNG")
+                
+                if not os.path.exists(mvs_mask_path):
+                    # CO3D "apple" dataset actually checks /images -> /masks
+                    # Let's fallback if depth_masks isn't there but masks is
+                    fallback_mask = safe_img_path.replace("/images", "/masks").replace(".jpg", ".png")
+                    if os.path.exists(fallback_mask):
+                        mvs_mask_path = fallback_mask
+
                 mvs_mask = cv2.imread(mvs_mask_path, cv2.IMREAD_GRAYSCALE) > 128
                 depth_map[~mvs_mask] = 0
 
