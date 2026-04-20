@@ -44,6 +44,146 @@ def unproject_depth_map_to_point_map(
     return world_points_array
 
 
+def unproject_depth_with_gt_cameras(
+    depth_map,
+    pred_extrinsics,
+    gt_extrinsics_3x4: np.ndarray,
+    gt_intrinsics_native: np.ndarray,
+    original_image_sizes,
+):
+    """
+    Unproject predicted depth maps into 3D using ground-truth camera parameters.
+
+    The predicted depth maps live in the model's internal normalised scale.  A
+    single scale factor is estimated by comparing the camera-baseline implied by
+    the predicted cameras against the baseline implied by the GT cameras, and that
+    factor is applied to the depth before unprojection.
+
+    GT intrinsics are rescaled from their native (original) pixel resolution to
+    the 518-px resolution that ``load_and_preprocess_images(mode='crop')``
+    produces, because that is the pixel grid the depth maps are aligned to.
+
+    GT extrinsics are normalised so that camera-0 is at the world origin
+    (identity pose).  All other cameras are expressed relative to camera-0.
+
+    Args:
+        depth_map: Predicted depth maps, shape (S, H, W) or (S, H, W, 1).
+                   Accepts both torch.Tensor and np.ndarray.
+        pred_extrinsics: Predicted extrinsic matrices, shape (S, 3, 4) in
+                         OpenCV convention (camera from world).
+                         Accepts both torch.Tensor and np.ndarray.
+        gt_extrinsics_3x4 (np.ndarray): Ground-truth extrinsics already
+                         converted to **OpenCV convention** (x-right, y-down,
+                         z-forward), shape (S, 3, 4).  Raw PyTorch3D
+                         frame_annotations must be converted first via
+                         ``convert_pt3d_to_opencv`` before being passed here.
+        gt_intrinsics_native (np.ndarray): Ground-truth intrinsics in the
+                         **original** image pixel space, shape (S, 3, 3).
+                         Must have already been denormalised from PyTorch3D's
+                         normalised focal/principal-point representation.
+        original_image_sizes: Sequence of (W, H) tuples, one per frame, giving
+                         the pixel dimensions of the original (un-resized) images.
+
+    Returns:
+        tuple:
+            - point_map (np.ndarray): 3D world points shape (S, H, W, 3) expressed
+              in the coordinate frame of GT camera-0.
+            - depth_scale (float): Scale factor applied to depth
+              (VGGT normalised units → GT metric units).
+    """
+    # ------------------------------------------------------------------ #
+    # Convert inputs to numpy                                              #
+    # ------------------------------------------------------------------ #
+    if isinstance(depth_map, torch.Tensor):
+        depth_map = depth_map.cpu().float().numpy()
+    if isinstance(pred_extrinsics, torch.Tensor):
+        pred_extrinsics = pred_extrinsics.cpu().float().numpy()
+
+    depth_map = np.asarray(depth_map, dtype=np.float32)
+    pred_extrinsics = np.asarray(pred_extrinsics, dtype=np.float32)
+    gt_extrinsics_3x4 = np.asarray(gt_extrinsics_3x4, dtype=np.float32)
+    gt_intrinsics_native = np.asarray(gt_intrinsics_native, dtype=np.float32)
+
+    S = depth_map.shape[0]
+    assert gt_extrinsics_3x4.shape == (S, 3, 4), f"gt_extrinsics_3x4 shape mismatch: {gt_extrinsics_3x4.shape}"
+    assert gt_intrinsics_native.shape == (S, 3, 3), f"gt_intrinsics_native shape mismatch: {gt_intrinsics_native.shape}"
+    assert len(original_image_sizes) == S
+
+    # ------------------------------------------------------------------ #
+    # 1. Rescale GT intrinsics to 518-px model-input space                #
+    #    Replicates load_and_preprocess_images(mode="crop"):               #
+    #      - resize width to 518, maintain aspect ratio (÷14 rounding)    #
+    #      - centre-crop height if new_height > 518                        #
+    # ------------------------------------------------------------------ #
+    TARGET = 518
+    gt_intrinsics_518 = np.zeros_like(gt_intrinsics_native)
+    for i, (W_orig, H_orig) in enumerate(original_image_sizes):
+        H_resized = round(H_orig * (TARGET / W_orig) / 14) * 14
+        sw = TARGET / W_orig          # width scale
+        sh = H_resized / H_orig       # height scale
+        crop_y = (H_resized - TARGET) // 2 if H_resized > TARGET else 0
+
+        K = gt_intrinsics_native[i].copy()
+        K[0, 0] *= sw          # fx
+        K[1, 1] *= sh          # fy
+        K[0, 2] *= sw          # cx
+        K[1, 2]  = K[1, 2] * sh - crop_y  # cy: scale then subtract crop offset
+        gt_intrinsics_518[i] = K
+
+    # ------------------------------------------------------------------ #
+    # 2. Normalise GT extrinsics so camera-0 is the world origin          #
+    # ------------------------------------------------------------------ #
+    bottom = np.tile(np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (S, 1, 1))  # (S,1,4)
+    gt_ext_4x4 = np.concatenate([gt_extrinsics_3x4, bottom], axis=1)  # (S, 4, 4)
+
+    # closed_form_inverse_se3 expects a batch (N, 4, 4)
+    first_inv = closed_form_inverse_se3(gt_ext_4x4[0:1])   # (1, 4, 4)
+    gt_ext_rel_4x4 = gt_ext_4x4 @ first_inv[0]             # (S, 4, 4); cam-0 → identity
+    gt_ext_rel_3x4 = gt_ext_rel_4x4[:, :3, :]              # (S, 3, 4)
+
+    # ------------------------------------------------------------------ #
+    # 3. Estimate depth scale via camera-baseline ratio                   #
+    #    Predicted camera centres: C_i = -R_i^T @ t_i                    #
+    #    Baseline_pred = ||C_i - C_0||  (accounts for un-normalised cams) #
+    #    Baseline_GT   = ||t_i_rel|| (GT cam-0 is at origin after step 2) #
+    #                                                                      #
+    #    Uses the *median* of per-pair scale ratios for robustness.        #
+    #    A depth-scale error ε causes a world-space shift of               #
+    #    ε·(p_world − C_i) per view, which is view-dependent when         #
+    #    cameras sit at different elevations.  Using median reduces        #
+    #    the impact of outlier camera-pair ratios.                         #
+    # ------------------------------------------------------------------ #
+    if S > 1:
+        # Predicted camera centres
+        R_pred = pred_extrinsics[:, :3, :3]   # (S, 3, 3)
+        t_pred = pred_extrinsics[:, :3, 3]    # (S, 3)
+        C_pred = -np.einsum("sij,sj->si", R_pred.transpose(0, 2, 1), t_pred)  # (S, 3)
+        pred_baselines = np.linalg.norm(C_pred[1:] - C_pred[0:1], axis=-1)    # (S-1,)
+
+        # GT camera centres relative to cam-0 (which sits at origin)
+        # For an OpenCV extrinsic [R|t], the camera centre is -R^T t.
+        # Since cam-0 is identity after normalisation, GT cam-0 centre = [0,0,0].
+        gt_baselines = np.linalg.norm(gt_ext_rel_3x4[1:, :3, 3], axis=-1)     # (S-1,)
+
+        # Per-pair scale ratios: gt_baseline_i / pred_baseline_i
+        valid = pred_baselines > 1e-8
+        if valid.any():
+            per_pair_scales = gt_baselines[valid] / pred_baselines[valid]
+            depth_scale = float(np.median(per_pair_scales))
+        else:
+            depth_scale = 1.0
+    else:
+        depth_scale = 1.0
+
+    # ------------------------------------------------------------------ #
+    # 4. Scale depth and unproject                                        #
+    # ------------------------------------------------------------------ #
+    scaled_depth = depth_map * depth_scale
+    point_map = unproject_depth_map_to_point_map(scaled_depth, gt_ext_rel_3x4, gt_intrinsics_518)
+
+    return point_map, depth_scale
+
+
 def depth_to_world_coords_points(
     depth_map: np.ndarray,
     extrinsic: np.ndarray,

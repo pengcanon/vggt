@@ -29,11 +29,15 @@ CATEGORY_CONFIG = {
         "ext": "*.jpg",
     },
     "human_body": {
-        "image_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_00\sequence_001\images",
-        "mask_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_00\sequence_001\masks",
+        "image_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_01\sequence_001\images",
+        "mask_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_01\sequence_001\masks",
         "checkpoint": r"d:\GitHub\vggt\training\logs\human_body_finetune\ckpts\checkpoint.pt",
         "ext": "*.jpg",
-        "annotation_file": r"d:\GitHub\vggt\datasets\human_body\annotations\human_body_test.jgz",
+        # Raw OpenCV frame_annotations.jgz for the sequence being tested
+        "raw_annotation_file": r"d:\GitHub\vggt\datasets\human_body\human_body_01\frame_annotations.jgz",
+        "dataset_root": r"d:\GitHub\vggt\datasets\human_body",
+        # Rig layout: 5 horizontal rings x 80 cameras each, ordered ring-by-ring in the annotation file
+        "ring_size": 80,
     },
 }
 
@@ -88,8 +92,17 @@ def main():
     parser.add_argument("--pretrained", action="store_true", help="Use pretrained model instead of fine-tuned")
     parser.add_argument("--category", default="apple", choices=list(CATEGORY_CONFIG.keys()),
                         help="Category to test on (default: apple)")
-    parser.add_argument("--num_frames", type=int, default=8, help="Number of frames to sample")
+    parser.add_argument("--num_frames", type=int, default=12, help="Number of frames to sample")
     parser.add_argument("--use_gt_cameras", action="store_true", help="Use ground truth cameras instead of predicted cameras")
+    parser.add_argument("--gt_source", default="raw", choices=["raw", "generated"],
+                        help="GT camera source: 'raw' uses frame_annotations.jgz (OpenCV w2c), "
+                             "'generated' uses pre-converted annotation file from prepare_human_body.py")
+    parser.add_argument("--fixed", action="store_true",
+                        help="Select frames at fixed evenly-spaced indices (no randomness) for reproducible comparison")
+    parser.add_argument("--ring", type=int, default=0,
+                        help="For multi-ring datasets: which horizontal camera ring to sample from (default: 0)")
+    parser.add_argument("--multi_ring", action="store_true",
+                        help="Sample one camera from each elevation ring (overrides --ring)")
     args = parser.parse_args()
 
     cfg = CATEGORY_CONFIG[args.category]
@@ -124,15 +137,34 @@ def main():
     model = model.to(device)
     print("Model loaded successfully")
 
-    # Load sample images (pick random frames from one sequence)
+    # Load sample images
     image_dir = cfg["image_dir"]
     all_images = sorted(glob.glob(os.path.join(image_dir, cfg["ext"])))
     if not all_images:
         print(f"No images found in {image_dir}")
         return
     num_frames = min(args.num_frames, len(all_images))
-    indices = np.sort(np.random.choice(len(all_images), num_frames, replace=False))
-    image_names = [all_images[i] for i in indices]
+    if args.fixed and args.multi_ring and "ring_size" in cfg:
+        # Pick one camera per elevation ring, all at the same horizontal angle
+        ring_size = cfg["ring_size"]
+        total_rings = len(all_images) // ring_size
+        # Use the same horizontal index within each ring (middle of the ring)
+        horizontal_idx = ring_size // 2
+        image_names = [all_images[r * ring_size + horizontal_idx] for r in range(total_rings)]
+        print(f"[fixed multi_ring] Picked camera index {horizontal_idx} from each of {total_rings} rings")
+    elif args.fixed:
+        # Evenly-spaced indices within a single ring
+        ring_size = cfg.get("ring_size", len(all_images))
+        ring_start = args.ring * ring_size
+        ring_end = min(ring_start + ring_size, len(all_images))
+        ring_images = all_images[ring_start:ring_end]
+        num_in_ring = min(num_frames, len(ring_images))
+        indices_in_ring = np.linspace(0, len(ring_images) - 1, num_in_ring, dtype=int)
+        image_names = [ring_images[i] for i in indices_in_ring]
+        print(f"[fixed] Ring {args.ring} (frames {ring_start}-{ring_end-1}), selecting {num_in_ring} evenly-spaced cameras")
+    else:
+        indices = np.sort(np.random.choice(len(all_images), num_frames, replace=False))
+        image_names = [all_images[i] for i in indices]
     print(f"Selected {len(image_names)} images from {image_dir}:")
     for name in image_names:
         print(f"  {os.path.basename(name)}")
@@ -141,63 +173,77 @@ def main():
     print(f"Preprocessed images shape: {image_inputs.shape}")
 
     # Load GT cameras if requested
-    gt_cameras = None
-    if args.use_gt_cameras and "annotation_file" in cfg:
+    gt_extrinsics_3x4 = None
+    gt_intrinsics_518 = None
+    if args.use_gt_cameras:
         import gzip
         import json
-        
-        print(f"Loading GT cameras from {cfg['annotation_file']}...")
-        with gzip.open(cfg["annotation_file"], "rt") as f:
-            anno_data = json.load(f)
-            
-        gt_extrinsics = []
-        gt_intrinsics = []
-        
-        # Need to match image names to filepath in annotations
-        # image_names are full absolute paths, annotations are relative to dataset root
-        dataset_root = os.path.dirname(os.path.dirname(cfg["annotation_file"]))
-        
-        for img_path in image_names:
-            rel_path = os.path.relpath(img_path, dataset_root).replace("\\", "/")
-            seq_name = img_path.split(os.sep)[-3]  # e.g., sequence_001
-            found = False
-            
-            # The structure in annotations is {sequence_name: [{filepath: ..., extri: ..., intri: ...}, ...]}
-            if seq_name in anno_data:
-                for frame in anno_data[seq_name]:
-                    if frame["filepath"] == rel_path:
-                        gt_extrinsics.append(frame["extri"])
-                        gt_intrinsics.append(frame["intri"])
-                        found = True
-                        break
-            
-            # Fallback search if not found
-            if not found:
-                for seq_frames in anno_data.values():
-                    for frame in seq_frames:
-                        if frame["filepath"] == rel_path:
-                            gt_extrinsics.append(frame["extri"])
-                            gt_intrinsics.append(frame["intri"])
-                            found = True
-                            break
-                            
-            if not found:
-                raise ValueError(f"Could not find GT cameras for {rel_path} in annotations")
-                
-        # Format tensors and apply VGGT camera formatting
-        # VGGT expects extrinsics [B, V, 4, 4] and intrinsics [B, V, 3, 3] on the correct device
-        gt_intrinsics = torch.tensor(gt_intrinsics, dtype=torch.float32, device=device).unsqueeze(0)
-        
-        # GT extrinsics are 3x4, extend to 4x4
-        gt_ext_4x4 = []
-        for ext in gt_extrinsics:
-            ext_tensor = torch.tensor(ext, dtype=torch.float32, device=device)
-            bottom_row = torch.tensor([[0, 0, 0, 1]], dtype=torch.float32, device=device)
-            ext_4x4 = torch.cat([ext_tensor, bottom_row], dim=0)
-            gt_ext_4x4.append(ext_4x4)
-        gt_extrinsics = torch.stack(gt_ext_4x4).unsqueeze(0)
-        
-        gt_cameras = (gt_extrinsics, gt_intrinsics)
+
+        if args.gt_source == "raw" and "raw_annotation_file" in cfg:
+            # Raw annotations are in OpenCV w2c format: R (3x3), T (3,)
+            print(f"Loading raw GT cameras from {cfg['raw_annotation_file']}...")
+            with gzip.open(cfg["raw_annotation_file"], "rt") as f:
+                all_frames = json.load(f)
+
+            dataset_root = cfg["dataset_root"]
+            frame_lookup = {fr["image"]["path"].replace("\\", "/"): fr for fr in all_frames}
+
+            gt_ext_list = []
+            gt_int_list = []
+            for img_path in image_names:
+                rel_path = os.path.relpath(img_path, dataset_root).replace("\\", "/")
+                if rel_path not in frame_lookup:
+                    raise ValueError(f"Could not find GT cameras for {rel_path}")
+                vp = frame_lookup[rel_path]["viewpoint"]
+                R = np.array(vp["R"], dtype=np.float32)
+                T = np.array(vp["T"], dtype=np.float32).reshape(3, 1)
+                gt_ext_list.append(np.hstack((R, T)))
+                # Scale intrinsics from native resolution to the 518px model input.
+                # Mirrors load_and_preprocess_images (mode="crop"): width->518,
+                # height to nearest multiple of 14, center-crop if height > 518.
+                # Intrinsics are already in OpenCV pixel units at native resolution.
+                with Image.open(img_path) as img:
+                    W_orig, H_orig = img.size
+                fx, fy = vp["focal_length"]     # pixels at native resolution
+                cx, cy = vp["principal_point"]  # pixels at native resolution
+                H_res  = round(H_orig * (518 / W_orig) / 14) * 14
+                sw = 518 / W_orig;  sh = H_res / H_orig
+                crop_y = (H_res - 518) // 2 if H_res > 518 else 0
+                gt_int_list.append(np.array([
+                    [fx * sw,  0.,          cx * sw          ],
+                    [0.,          fy * sh,  cy * sh - crop_y ],
+                    [0.,          0.,          1.             ]
+                ], dtype=np.float32))
+            gt_extrinsics_3x4 = np.array(gt_ext_list, dtype=np.float32)   # (S, 3, 4)
+            gt_intrinsics_518 = np.array(gt_int_list, dtype=np.float32)    # (S, 3, 3)
+
+        elif args.gt_source == "generated":
+            dataset_root = cfg["dataset_root"]
+            anno_dir = os.path.join(dataset_root, "annotations")
+            for split in ("test", "train"):
+                candidate = os.path.join(anno_dir, f"human_body_{split}.jgz")
+                if os.path.exists(candidate):
+                    anno_file = candidate
+                    break
+            else:
+                raise FileNotFoundError(f"No generated annotation file found in {anno_dir}")
+
+            print(f"Loading generated GT cameras from {anno_file}...")
+            with gzip.open(anno_file, "rt") as f:
+                anno_data = json.load(f)
+
+            frame_lookup = {}
+            for seq_frames in anno_data.values():
+                for frame in seq_frames:
+                    frame_lookup[frame["filepath"]] = frame
+
+            gt_ext_list = []
+            for img_path in image_names:
+                rel_path = os.path.relpath(img_path, dataset_root).replace("\\", "/")
+                if rel_path not in frame_lookup:
+                    raise ValueError(f"Could not find GT cameras for {rel_path} in {anno_file}")
+                gt_ext_list.append(frame_lookup[rel_path]["extri"])  # already OpenCV 3x4
+            gt_extrinsics_3x4 = np.array(gt_ext_list, dtype=np.float32)  # (S, 3, 4)
 
     # Step-by-step inference (matching notebook pattern)
     print("Running inference...")
@@ -209,21 +255,47 @@ def main():
         # Predict cameras
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
         extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, image_inputs.shape[-2:])
-        
-        # Override with GT cameras if requested
-        if gt_cameras is not None:
-            extrinsic, intrinsic = gt_cameras
-            print(f"Using GT cameras shape: {extrinsic.shape}, {intrinsic.shape}")
+
+        # Override cameras with GT if requested.
+        # Strategy: keep GT cameras in metric space (normalised to cam-0 only);
+        # scale predicted depth UP by avg_scale so depth and cameras are in the same units.
+        # avg_scale = mean(||t_gt_rel||) / mean(||t_pred||)  — the same factor VGGT divided
+        # depths and translations by during training normalisation.
+        avg_scale = None
+        if gt_extrinsics_3x4 is not None:
+            from vggt.utils.geometry import closed_form_inverse_se3
+
+            S = gt_extrinsics_3x4.shape[0]
+            bottom = np.tile(np.array([[0, 0, 0, 1]], dtype=np.float32), (S, 1, 1))
+            gt_ext_4x4 = torch.tensor(
+                np.concatenate([gt_extrinsics_3x4, bottom], axis=1),
+                dtype=torch.float32, device=device
+            ).unsqueeze(0)                                                    # (1, S, 4, 4)
+            first_inv = closed_form_inverse_se3(gt_ext_4x4[:, 0])
+            gt_ext_rel = torch.matmul(gt_ext_4x4, first_inv.unsqueeze(1))    # (1, S, 4, 4)
+
+            pred_t = torch.linalg.norm(extrinsic[:, 1:, :3, 3], dim=-1)
+            gt_t   = torch.linalg.norm(gt_ext_rel[:, 1:, :3, 3], dim=-1)
+            avg_scale = (gt_t.mean() / (pred_t.mean() + 1e-8)).item()
+
+            extrinsic = gt_ext_rel   # metric, cam-0 normalised
+            intrinsic = torch.tensor(gt_intrinsics_518, dtype=torch.float32, device=device).unsqueeze(0)
+            print(f"GT cameras: cam-0 normalised, metric. avg_scale={avg_scale:.4f}")
 
         # Predict depth maps
         depth_map, depth_conf = model.depth_head(aggregated_tokens_list, image_inputs, ps_idx)
 
-        # Construct 3D points from depth maps and cameras
+        # Scale depth from VGGT normalised units up to metric to match GT cameras
+        if avg_scale is not None:
+            depth_map = depth_map * avg_scale
+
+        # Unproject using final extrinsics + intrinsics
         point_map_by_unprojection = unproject_depth_map_to_point_map(
             depth_map.squeeze(0),
             extrinsic.squeeze(0),
             intrinsic.squeeze(0),
         )
+
 
     print(f"Depth map shape: {depth_map.shape}")
     print(f"Extrinsic shape: {extrinsic.shape}")
@@ -232,12 +304,12 @@ def main():
     # Show the 5 input images
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, len(image_names), figsize=(4 * len(image_names), 4))
+    fig, axes = plt.subplots(1, len(image_names), figsize=(4 * len(image_names), 4), squeeze=False)
     for idx, img_path in enumerate(image_names):
         img = Image.open(img_path).convert("RGB")
-        axes[idx].imshow(img)
-        axes[idx].set_title(os.path.basename(img_path), fontsize=9)
-        axes[idx].axis("off")
+        axes[0, idx].imshow(img)
+        axes[0, idx].set_title(os.path.basename(img_path), fontsize=9)
+        axes[0, idx].axis("off")
     model_label = "Pretrained" if args.pretrained else "Fine-tuned"
     fig.suptitle(f"Input {args.category} Images ({model_label})", fontsize=14)
     plt.tight_layout()

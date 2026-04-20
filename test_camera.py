@@ -16,7 +16,7 @@ try:
             print("PT3D focal:", d["viewpoint"]["focal_length"])
             print("PT3D prin:", d["viewpoint"]["principal_point"])
             break
-            
+
     with gzip.open(vggt_anno_file, "rt") as f:
         data = json.load(f)
         vggt_anno = data["110_13051_23361"][0]
