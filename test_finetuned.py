@@ -23,19 +23,19 @@ from vggt.utils.geometry import unproject_depth_map_to_point_map
 # Per-category config: image_dir, mask_dir, checkpoint, image extension
 CATEGORY_CONFIG = {
     "apple": {
-        "image_dir": r"d:\GitHub\vggt\datasets\co3d\dataset\multi_view\apple\110_13051_23361\images",
-        "mask_dir": r"d:\GitHub\vggt\datasets\co3d\dataset\multi_view\apple\110_13051_23361\masks",
-        "checkpoint": r"d:\GitHub\vggt\training\logs\apple_finetune\ckpts\checkpoint.pt",
+        "image_dir": "datasets/co3d/dataset/multi_view/apple/110_13051_23361/images",
+        "mask_dir": "datasets/co3d/dataset/multi_view/apple/110_13051_23361/masks",
+        "checkpoint": "training/logs/apple_finetune/ckpts/checkpoint.pt",
         "ext": "*.jpg",
     },
     "human_body": {
-        "image_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_00\sequence_001\images",
-        "mask_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_00\sequence_001\masks",
-        "checkpoint": r"d:\GitHub\vggt\training\logs\human_body_finetune\ckpts\checkpoint.pt",
+        "image_dir": "datasets/human_body/human_body_00/sequence_001/images",
+        "mask_dir": "datasets/human_body/human_body_00/sequence_001/masks",
+        "checkpoint": "training/logs/human_body_finetune/ckpts/checkpoint.pt",
         "ext": "*.jpg",
         # Raw OpenCV frame_annotations.jgz for the sequence being tested
-        "raw_annotation_file": r"d:\GitHub\vggt\datasets\human_body\human_body_00\frame_annotations.jgz",
-        "dataset_root": r"d:\GitHub\vggt\datasets\human_body",
+        "raw_annotation_file": "datasets/human_body/human_body_00/frame_annotations.jgz",
+        "dataset_root": "datasets/human_body",
         # Rig layout: 5 horizontal rings x 80 cameras each, ordered ring-by-ring in the annotation file
         "ring_size": 80,
     },
@@ -112,7 +112,7 @@ def main():
 
     if args.pretrained:
         # Use the full pretrained model (all heads enabled)
-        checkpoint_path = r"d:\GitHub\vggt\vggt\pretrained\model.pt"
+        checkpoint_path = "vggt/pretrained/model.pt"
         print(f"Loading PRETRAINED model from {checkpoint_path}...")
         model = VGGT()
         state_dict = torch.load(checkpoint_path, map_location="cpu")
