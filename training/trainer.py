@@ -717,6 +717,8 @@ class Trainer:
         if self.data_conf.train.common_config.repeat_batch:
             batch = self._apply_batch_repetition(batch)
         
+        scale_by_points = self.data_conf.train.common_config.get("scale_by_points", True)
+        
         # Normalize camera extrinsics and points. The function returns new tensors.
         normalized_extrinsics, normalized_cam_points, normalized_world_points, normalized_depths = \
             normalize_camera_extrinsics_and_points_batch(
@@ -724,6 +726,7 @@ class Trainer:
                 cam_points=batch["cam_points"],
                 world_points=batch["world_points"],
                 depths=batch["depths"],
+                scale_by_points=scale_by_points,
                 point_masks=batch["point_masks"],
             )
 

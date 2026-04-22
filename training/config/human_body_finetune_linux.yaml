@@ -25,6 +25,7 @@ data:
       debug: False
       repeat_batch: False
       img_nums: [2, 12]
+      scale_by_points: False
     dataset:
       _target_: data.composed_dataset.ComposedDataset
       dataset_configs:
@@ -43,6 +44,7 @@ data:
       patch_size: ${patch_size}
       debug: False
       img_nums: [2, 12]
+      scale_by_points: False
     dataset:
       _target_: data.composed_dataset.ComposedDataset
       dataset_configs:

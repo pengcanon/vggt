@@ -5,31 +5,14 @@ import gzip
 import numpy as np
 from PIL import Image
 
-def convert_pt3d_to_opencv(R_pt3d, T_pt3d, focal_length, principal_point, image_size):
-    R = np.array(R_pt3d)
-    T = np.array(T_pt3d)
-    
-    # PT3D World-to-Camera rotation and translation
-    R_w2c = R.T
-    T_w2c = T
-    
-    # PyTorch3D to OpenCV: Flip X and Y
-    flip = np.array([[-1, 0, 0], 
-                     [0, -1, 0], 
-                     [0,  0, 1]], dtype=np.float32)
-    
-    R_cv = flip @ R_w2c
-    T_cv = flip @ T_w2c
+def get_opencv_matrices(vp):
+    R_cv = np.array(vp["R"], dtype=np.float32)
+    T_cv = np.array(vp["T"], dtype=np.float32)
     
     extri = np.hstack((R_cv, T_cv.reshape(3, 1)))
     
-    W, H = image_size
-    s = min(H, W) / 2.0
-    
-    fx = focal_length[0] * s
-    fy = focal_length[1] * s
-    cx = (W / 2.0) - (principal_point[0] * s)
-    cy = (H / 2.0) - (principal_point[1] * s)
+    fx, fy = vp["focal_length"]
+    cx, cy = vp["principal_point"]
     
     intri = np.array([
         [fx, 0., cx],
@@ -71,19 +54,8 @@ def generate_annotations(dataset_root, category_name="human_body", test_split_ra
             if not os.path.exists(full_img_path):
                 continue
                 
-            try:
-                with Image.open(full_img_path) as img:
-                    W, H = img.size
-            except Exception as e:
-                print(f"Failed to read image {full_img_path}: {e}")
-                continue
-                
             vp = frame["viewpoint"]
-            extri, intri = convert_pt3d_to_opencv(
-                vp["R"], vp["T"], 
-                vp["focal_length"], vp["principal_point"], 
-                (W, H)
-            )
+            extri, intri = get_opencv_matrices(vp)
             
             frame_dict = {
                 "filepath": filepath,

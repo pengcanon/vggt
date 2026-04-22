@@ -29,12 +29,12 @@ CATEGORY_CONFIG = {
         "ext": "*.jpg",
     },
     "human_body": {
-        "image_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_01\sequence_001\images",
-        "mask_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_01\sequence_001\masks",
+        "image_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_00\sequence_001\images",
+        "mask_dir": r"d:\GitHub\vggt\datasets\human_body\human_body_00\sequence_001\masks",
         "checkpoint": r"d:\GitHub\vggt\training\logs\human_body_finetune\ckpts\checkpoint.pt",
         "ext": "*.jpg",
         # Raw OpenCV frame_annotations.jgz for the sequence being tested
-        "raw_annotation_file": r"d:\GitHub\vggt\datasets\human_body\human_body_01\frame_annotations.jgz",
+        "raw_annotation_file": r"d:\GitHub\vggt\datasets\human_body\human_body_00\frame_annotations.jgz",
         "dataset_root": r"d:\GitHub\vggt\datasets\human_body",
         # Rig layout: 5 horizontal rings x 80 cameras each, ordered ring-by-ring in the annotation file
         "ring_size": 80,
@@ -99,10 +99,9 @@ def main():
                              "'generated' uses pre-converted annotation file from prepare_human_body.py")
     parser.add_argument("--fixed", action="store_true",
                         help="Select frames at fixed evenly-spaced indices (no randomness) for reproducible comparison")
-    parser.add_argument("--ring", type=int, default=0,
-                        help="For multi-ring datasets: which horizontal camera ring to sample from (default: 0)")
-    parser.add_argument("--multi_ring", action="store_true",
-                        help="Sample one camera from each elevation ring (overrides --ring)")
+    parser.add_argument("--ring", type=str, default="0",
+                        help="Which ring(s) to sample from. Use an integer for a single ring (e.g. 0, 1, 2) "
+                             "or 'all' to sample one camera from every elevation ring.")
     args = parser.parse_args()
 
     cfg = CATEGORY_CONFIG[args.category]
@@ -144,24 +143,33 @@ def main():
         print(f"No images found in {image_dir}")
         return
     num_frames = min(args.num_frames, len(all_images))
-    if args.fixed and args.multi_ring and "ring_size" in cfg:
+    # Parse --ring: integer or "all"
+    if args.ring.lower() == "all":
+        ring_selection = "all"
+    else:
+        try:
+            ring_selection = int(args.ring)
+        except ValueError:
+            raise ValueError(f"--ring must be an integer or 'all', got '{args.ring}'")
+
+    if args.fixed and ring_selection == "all" and "ring_size" in cfg:
         # Pick one camera per elevation ring, all at the same horizontal angle
         ring_size = cfg["ring_size"]
         total_rings = len(all_images) // ring_size
-        # Use the same horizontal index within each ring (middle of the ring)
         horizontal_idx = ring_size // 2
         image_names = [all_images[r * ring_size + horizontal_idx] for r in range(total_rings)]
-        print(f"[fixed multi_ring] Picked camera index {horizontal_idx} from each of {total_rings} rings")
+        print(f"[fixed all-rings] Picked camera index {horizontal_idx} from each of {total_rings} rings")
     elif args.fixed:
         # Evenly-spaced indices within a single ring
+        ring_idx = ring_selection if isinstance(ring_selection, int) else 0
         ring_size = cfg.get("ring_size", len(all_images))
-        ring_start = args.ring * ring_size
+        ring_start = ring_idx * ring_size
         ring_end = min(ring_start + ring_size, len(all_images))
         ring_images = all_images[ring_start:ring_end]
         num_in_ring = min(num_frames, len(ring_images))
         indices_in_ring = np.linspace(0, len(ring_images) - 1, num_in_ring, dtype=int)
         image_names = [ring_images[i] for i in indices_in_ring]
-        print(f"[fixed] Ring {args.ring} (frames {ring_start}-{ring_end-1}), selecting {num_in_ring} evenly-spaced cameras")
+        print(f"[fixed] Ring {ring_idx} (frames {ring_start}-{ring_end-1}), selecting {num_in_ring} evenly-spaced cameras")
     else:
         indices = np.sort(np.random.choice(len(all_images), num_frames, replace=False))
         image_names = [all_images[i] for i in indices]
