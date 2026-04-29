@@ -25,16 +25,16 @@ CATEGORY_CONFIG = {
     "apple": {
         "image_dir": "datasets/co3d/dataset/multi_view/apple/110_13051_23361/images",
         "mask_dir": "datasets/co3d/dataset/multi_view/apple/110_13051_23361/masks",
-        "checkpoint": "training/logs/apple_finetune/ckpts/checkpoint.pt",
+        "checkpoint": "training/logs/co3d_subset_finetune/ckpts/checkpoint.pt",
         "ext": "*.jpg",
     },
     "human_body": {
-        "image_dir": "datasets/human_body/human_body_00/sequence_001/images",
-        "mask_dir": "datasets/human_body/human_body_00/sequence_001/masks",
+        "image_dir": "datasets/human_body/human_body_03/sequence_001/images",
+        "mask_dir": "datasets/human_body/human_body_03/sequence_001/masks",
         "checkpoint": "training/logs/human_body_finetune/ckpts/checkpoint.pt",
         "ext": "*.jpg",
         # Raw OpenCV frame_annotations.jgz for the sequence being tested
-        "raw_annotation_file": "datasets/human_body/human_body_00/frame_annotations.jgz",
+        "raw_annotation_file": "datasets/human_body/human_body_03/frame_annotations.jgz",
         "dataset_root": "datasets/human_body",
         # Rig layout: 5 horizontal rings x 80 cameras each, ordered ring-by-ring in the annotation file
         "ring_size": 80,
